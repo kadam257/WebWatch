@@ -1,0 +1,362 @@
+{% extends "main/base.html" %}
+
+{% block title %}{{ party.name }} - WebWatch{% endblock %}
+
+{% block extra_css %}
+<style>
+    .party-header {
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom: 2px solid #333;
+    }
+    .party-header h2 {
+        color: #fff;
+        margin-bottom: 5px;
+    }
+    .party-info {
+        color: #999;
+        font-size: 0.9rem;
+    }
+    .video-container {
+        background: #000;
+        border-radius: 8px;
+        overflow: hidden;
+        margin-bottom: 20px;
+    }
+    video {
+        width: 100%;
+        display: block;
+    }
+    .chat-container {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 20px;
+        max-height: 300px;
+        overflow-y: auto;
+    }
+    .chat-message {
+        padding: 8px 0;
+        color: #e0e0e0;
+        font-size: 0.9rem;
+    }
+    .chat-message.system {
+        color: #4CAF50;
+        font-style: italic;
+    }
+    .status {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 15px;
+        margin-bottom: 20px;
+    }
+    .status-indicator {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 8px;
+    }
+    .status-indicator.connected {
+        background: #4CAF50;
+    }
+    .status-indicator.disconnected {
+        background: #f44336;
+    }
+    .host-badge {
+        display: inline-block;
+        background: #4CAF50;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-weight: bold;
+        margin-left: 10px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="party-header">
+    <h2>{{ party.name }}</h2>
+    <div class="party-info">
+        Created: {{ party.created_at|date:"M d, Y H:i" }}
+    </div>
+</div>
+
+<div class="status">
+    <span class="status-indicator disconnected" id="statusIndicator"></span>
+    <span id="statusText">Connecting...</span>
+    <span class="host-badge" id="hostBadge" style="display: none;">HOST</span>
+    <span id="participantCount" style="margin-left: 15px; color: #999;">0 watching</span>
+</div>
+
+<div class="video-container">
+    <video id="videoPlayer" controls>
+        <source src="{{ video_path }}" type="video/mp4">
+        Your browser does not support the video tag.
+    </video>
+</div>
+
+<div class="chat-container" id="chatContainer">
+    <div class="chat-message system">Welcome to the watch party!</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    const partyId = {{ party.id }};
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/party/${partyId}/`;
+
+    let socket = null;
+    let isHost = false;
+    let syncingVideo = false;  // Flag to prevent feedback loops
+    let waitingForSync = false;  // Flag to prevent multiple sync requests
+    let syncInterval = null;  // Periodic sync timer
+
+    const videoPlayer = document.getElementById('videoPlayer');
+    const chatContainer = document.getElementById('chatContainer');
+    const statusIndicator = document.getElementById('statusIndicator');
+    const statusText = document.getElementById('statusText');
+    const hostBadge = document.getElementById('hostBadge');
+    const participantCount = document.getElementById('participantCount');
+
+    const SYNC_THRESHOLD = 2.0;  // seconds - if off by more than this, resync
+    const SYNC_INTERVAL = 5000;  // ms - check sync every 5 seconds
+
+    function updateParticipantCount(count) {
+        const text = count === 1 ? '1 watching' : `${count} watching`;
+        participantCount.textContent = text;
+    }
+
+    function connectWebSocket() {
+        socket = new WebSocket(wsUrl);
+
+        socket.onopen = function(e) {
+            console.log('WebSocket connected');
+            statusIndicator.classList.remove('disconnected');
+            statusIndicator.classList.add('connected');
+            statusText.textContent = 'Connected';
+            addChatMessage('Connected to watch party', true);
+        };
+
+        socket.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            console.log('Message received:', data);
+
+            switch(data.type) {
+                case 'connection_established':
+                    isHost = data.is_host;
+                    if (isHost) {
+                        hostBadge.style.display = 'inline-block';
+                        addChatMessage('You are the host - your playback controls everyone', true);
+                    } else {
+                        addChatMessage('Click play to sync with host', true);
+                    }
+                    updateParticipantCount(data.participant_count);
+                    addChatMessage(data.message, true);
+                    break;
+
+                case 'user_joined':
+                    updateParticipantCount(data.participant_count);
+                    addChatMessage(data.message, true);
+                    break;
+
+                case 'user_left':
+                    updateParticipantCount(data.participant_count);
+                    addChatMessage(data.message, true);
+                    break;
+
+                case 'state_request':
+                    // Host sends current state to new viewer
+                    if (isHost) {
+                        sendMessage({
+                            type: 'state_response',
+                            requester: data.requester,
+                            state: {
+                                time: videoPlayer.currentTime,
+                                playing: !videoPlayer.paused
+                            }
+                        });
+                    }
+                    break;
+
+                case 'sync_check_request':
+                    // Host receives sync check request from viewer
+                    if (isHost) {
+                        sendMessage({
+                            type: 'sync_check_response',
+                            requester: data.requester,
+                            time: videoPlayer.currentTime
+                        });
+                    }
+                    break;
+
+                case 'sync_check':
+                    // Viewer receives periodic sync check from host
+                    if (!isHost && !syncingVideo) {
+                        const timeDiff = Math.abs(videoPlayer.currentTime - data.time);
+                        if (timeDiff > SYNC_THRESHOLD) {
+                            syncingVideo = true;
+                            videoPlayer.currentTime = data.time;
+                            syncingVideo = false;
+                            console.log(`Resynced: was off by ${timeDiff.toFixed(2)}s`);
+                        }
+                    }
+                    break;
+
+                case 'sync_state':
+                    // New viewer receives initial state from host
+                    syncingVideo = true;
+                    waitingForSync = false;  // Reset the flag
+                    videoPlayer.currentTime = data.state.time;
+                    if (data.state.playing) {
+                        videoPlayer.play().catch(err => {
+                            console.log('Autoplay blocked:', err);
+                        });
+                    } else {
+                        videoPlayer.pause();
+                    }
+                    syncingVideo = false;
+                    addChatMessage('Synced with host', true);
+                    break;
+
+                case 'play':
+                    syncingVideo = true;
+                    videoPlayer.currentTime = data.time || videoPlayer.currentTime;
+                    videoPlayer.play().catch(err => {
+                        console.log('Autoplay blocked:', err);
+                    });
+                    syncingVideo = false;
+                    addChatMessage('Host resumed playback', true);
+                    startPeriodicSync();
+                    break;
+
+                case 'pause':
+                    syncingVideo = true;
+                    videoPlayer.currentTime = data.time || videoPlayer.currentTime;
+                    videoPlayer.pause();
+                    syncingVideo = false;
+                    addChatMessage('Host paused playback', true);
+                    stopPeriodicSync();
+                    break;
+
+                case 'seek':
+                    syncingVideo = true;
+                    videoPlayer.currentTime = data.time;
+                    syncingVideo = false;
+                    addChatMessage(`Host seeked to ${Math.floor(data.time)}s`, true);
+                    break;
+
+                case 'error':
+                    addChatMessage(`Error: ${data.message}`, true);
+                    break;
+            }
+        };
+
+        socket.onclose = function(event) {
+            console.log('WebSocket disconnected');
+            statusIndicator.classList.remove('connected');
+            statusIndicator.classList.add('disconnected');
+            statusText.textContent = 'Disconnected';
+            hostBadge.style.display = 'none';
+            addChatMessage('Disconnected from watch party', true);
+        };
+
+        socket.onerror = function(error) {
+            console.error('WebSocket error:', error);
+            addChatMessage('Connection error', true);
+        };
+    }
+
+    function addChatMessage(message, isSystem = false) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'chat-message' + (isSystem ? ' system' : '');
+        messageDiv.textContent = message;
+        chatContainer.appendChild(messageDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
+
+    function sendMessage(data) {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify(data));
+        }
+    }
+
+    function startPeriodicSync() {
+        if (!isHost && !syncInterval) {
+            syncInterval = setInterval(() => {
+                if (!videoPlayer.paused && !syncingVideo) {
+                    // Request current time from host
+                    sendMessage({
+                        type: 'viewer_sync_check'
+                    });
+                }
+            }, SYNC_INTERVAL);
+        }
+    }
+
+    function stopPeriodicSync() {
+        if (syncInterval) {
+            clearInterval(syncInterval);
+            syncInterval = null;
+        }
+    }
+
+    // Host controls - send events when host interacts with video
+    // Viewers get re-synced when they try to play
+    if (videoPlayer) {
+        videoPlayer.addEventListener('play', function(e) {
+            if (isHost && !syncingVideo) {
+                sendMessage({
+                    type: 'play',
+                    time: videoPlayer.currentTime
+                });
+                startPeriodicSync();
+            } else if (!isHost && !syncingVideo && !waitingForSync) {
+                // Viewer clicked play, request sync from host
+                waitingForSync = true;
+                sendMessage({
+                    type: 'viewer_play_request'
+                });
+                startPeriodicSync();
+            }
+        });
+
+        videoPlayer.addEventListener('pause', function(e) {
+            if (isHost && !syncingVideo) {
+                sendMessage({
+                    type: 'pause',
+                    time: videoPlayer.currentTime
+                });
+                stopPeriodicSync();
+            } else if (!isHost && !syncingVideo) {
+                // Viewer paused - this is allowed for buffering
+                stopPeriodicSync();
+            }
+        });
+
+        videoPlayer.addEventListener('seeked', function(e) {
+            if (isHost && !syncingVideo) {
+                sendMessage({
+                    type: 'seek',
+                    time: videoPlayer.currentTime
+                });
+            }
+            // Viewers can seek freely, they'll sync when they click play
+        });
+    }
+
+    // Connect on page load
+    connectWebSocket();
+
+    // Clean up on page unload
+    window.addEventListener('beforeunload', function() {
+        if (socket) {
+            socket.close();
+        }
+    });
+</script>
+{% endblock %}

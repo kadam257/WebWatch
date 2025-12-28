@@ -1,0 +1,191 @@
+{% extends "main/base.html" %}
+
+{% block title %}WebWatch - Watch Parties{% endblock %}
+
+{% block extra_css %}
+<style>
+    .header-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 30px;
+    }
+    .party-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+        gap: 20px;
+    }
+    .party-card {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 20px;
+        transition: transform 0.2s, border-color 0.2s;
+    }
+    .party-card:hover {
+        transform: translateY(-2px);
+        border-color: #2196F3;
+    }
+    .party-card h3 {
+        color: #fff;
+        margin-bottom: 10px;
+        font-size: 1.3rem;
+    }
+    .party-info {
+        color: #999;
+        font-size: 0.9rem;
+        margin-bottom: 15px;
+    }
+    .party-info span {
+        display: block;
+        margin-bottom: 5px;
+    }
+    .empty-state {
+        text-align: center;
+        padding: 60px 20px;
+        color: #666;
+    }
+    .empty-state h2 {
+        margin-bottom: 10px;
+        color: #999;
+    }
+    .modal {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.8);
+        z-index: 1000;
+        align-items: center;
+        justify-content: center;
+    }
+    .modal.active {
+        display: flex;
+    }
+    .modal-content {
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 30px;
+        max-width: 500px;
+        width: 90%;
+    }
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+    }
+    .modal-header h3 {
+        color: #fff;
+        margin: 0;
+    }
+    .close-modal {
+        background: none;
+        border: none;
+        color: #999;
+        font-size: 24px;
+        cursor: pointer;
+        padding: 0;
+        width: 30px;
+        height: 30px;
+    }
+    .close-modal:hover {
+        color: #fff;
+    }
+    .form-group {
+        margin-bottom: 20px;
+    }
+    .form-group label {
+        display: block;
+        margin-bottom: 8px;
+        color: #e0e0e0;
+        font-weight: 500;
+    }
+    .form-group input {
+        width: 100%;
+        padding: 12px;
+        background: #0f0f0f;
+        border: 1px solid #333;
+        border-radius: 4px;
+        color: #e0e0e0;
+        font-size: 16px;
+    }
+    .form-group input:focus {
+        outline: none;
+        border-color: #2196F3;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="header-actions">
+    <h2>Active Watch Parties</h2>
+    <button onclick="openModal()" class="btn btn-primary">Create Party</button>
+</div>
+
+{% if watch_parties %}
+<div class="party-list">
+    {% for party in watch_parties %}
+    <div class="party-card">
+        <h3>{{ party.name }}</h3>
+        <div class="party-info">
+            <span>Created: {{ party.created_at|date:"M d, Y H:i" }}</span>
+            <span>{{ party.participant_count }} watching</span>
+            {% if party.torrent_file %}
+            <span>Torrent: {{ party.torrent_file.name|truncatechars:40 }}</span>
+            {% endif %}
+        </div>
+        <a href="{% url 'watch_party' party.id %}" class="btn">Join Party</a>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <h2>No active watch parties</h2>
+    <p>Create one to get started!</p>
+</div>
+{% endif %}
+
+<div id="createModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Create Watch Party</h3>
+            <button class="close-modal" onclick="closeModal()">&times;</button>
+        </div>
+        <form method="post" action="{% url 'create_party' %}" enctype="multipart/form-data">
+            {% csrf_token %}
+            <div class="form-group">
+                <label for="name">Party Name</label>
+                <input type="text" id="name" name="name" required placeholder="Enter party name">
+            </div>
+            <div class="form-group">
+                <label for="torrent_file">Torrent File</label>
+                <input type="file" id="torrent_file" name="torrent_file" accept=".torrent" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Create Party</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+    function openModal() {
+        document.getElementById('createModal').classList.add('active');
+    }
+
+    function closeModal() {
+        document.getElementById('createModal').classList.remove('active');
+    }
+
+    // Close modal when clicking outside
+    document.getElementById('createModal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            closeModal();
+        }
+    });
+</script>
+{% endblock %}
